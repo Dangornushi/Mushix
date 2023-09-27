@@ -20,7 +20,7 @@ $OBJCOPY -Ibinary -Oelf32-littleriscv shell.bin shell.bin.o
 $CC $CFLAGS -Wl,-Tkernel.ld -Wl,-Map=kernel.map -o kernel.elf \
     kernel.c virtq.c fileSystem.c common.c shell.bin.o
 
-# (cd disk && tar cf ../disk.tar --format=ustar ./*.txt)
+(cd disk && tar cf ../disk.tar --format=ustar ./*.txt)
 
 $QEMU -machine virt -bios default -nographic -serial mon:stdio --no-reboot \
     -drive id=drive0,file=disk.tar,format=raw \

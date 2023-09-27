@@ -356,6 +356,12 @@ void kernel_main(void) {
     char buf[SECTOR_SIZE];
     read_write_disk(buf, 0, false);
     printf("first sector: %s\n", buf);
+    printf(" ____    ____                 __        _           \n");
+    printf("|_   \\  /   _|               [  |      (_)          \n");
+    printf("  |   \\/   |  __   _   .--.   | |--.   __   _   __  \n");
+    printf("  | |\\  /| | [  | | | ( (`\\]  | .-. | [  | [ \\ [  ] \n");
+    printf(" _| |_\\/_| |_ | \\_/ |, `'.'.  | | | |  | |  > '  <  \n");
+    printf("|_____||_____|'.__.'_/[\\__) )[___]|__][___][__]`\\_] \n");
 
     strcpy(buf, "hello from kernel!!!\n");
     read_write_disk(buf, 0, true);
