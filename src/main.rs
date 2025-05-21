@@ -8,11 +8,14 @@ use core::iter::Iterator;
 use core::option::Option::Some;
 use core::panic::PanicInfo;
 use core::writeln;
+use mushix::qemu::exit_qemu;
+use mushix::qemu::QemuExitCode;
 use mushix::graphics::{draw_test_pattern, fill_rect, Bitmap};
 use mushix::uefi::{
     exit_from_efi_boot_services, init_vram, EfiHandle, EfiMemoryType, EfiSystemTable,
     MemoryMapHolder, VramTextWriter,
 };
+use mushix::x86::hlt;
 
 #[no_mangle]
 fn efi_main(image_handle: EfiHandle, efi_system_table: &EfiSystemTable) {
@@ -49,15 +52,8 @@ fn efi_main(image_handle: EfiHandle, efi_system_table: &EfiSystemTable) {
     }
 }
 
-pub fn hlt() {
-    unsafe {
-        asm!("hlt");
-    }
-}
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    loop {
-        hlt();
-    }
+    exit_qemu(QemuExitCode::Fail); 
 }
