@@ -2,15 +2,12 @@
 #![no_main]
 #![no_std]
 
-use core::arch::asm;
 use core::fmt::Write;
-use core::iter::Iterator;
-use core::option::Option::Some;
 use core::panic::PanicInfo;
 use core::writeln;
+use mushix::graphics::{draw_test_pattern, fill_rect, Bitmap};
 use mushix::qemu::exit_qemu;
 use mushix::qemu::QemuExitCode;
-use mushix::graphics::{draw_test_pattern, fill_rect, Bitmap};
 use mushix::uefi::{
     exit_from_efi_boot_services, init_vram, EfiHandle, EfiMemoryType, EfiSystemTable,
     MemoryMapHolder, VramTextWriter,
@@ -52,8 +49,7 @@ fn efi_main(image_handle: EfiHandle, efi_system_table: &EfiSystemTable) {
     }
 }
 
-
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
-    exit_qemu(QemuExitCode::Fail); 
+    exit_qemu(QemuExitCode::Fail);
 }
