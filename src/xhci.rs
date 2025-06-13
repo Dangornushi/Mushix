@@ -1134,7 +1134,7 @@ impl InputContext {
 #[derive(PartialEq, Eq)]
 pub enum EndpointType {
     IsochOut = 1,
-    BuldOut = 2,
+    BulkOut = 2,
     InterruptOut = 3,
     Control = 4,
     IsochIn = 5,
