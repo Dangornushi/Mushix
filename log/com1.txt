@@ -1,6 +1,43 @@
-[2J[01;01H[=3h[2J[01;01HBdsDxe: failed to load Boot0001 "UEFI QEMU DVD-ROM QM00003 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Secondary,Master,0x0): Not Found
-BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
-BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1,0x1)/Ata(Primary,Master,0x0)
-Running 1 tests
-[Runnning] >>> mushix::allocator::round_down_to_nearest_pow2
-Panic duringt est: PanicInfo { message: not implemented: cargo test should dail, right...?, location: Location { file: "src/allocator.rs", line: 25, col: 5 }, can_unwind: true, force_no_backtrace: false }
+[2J[01;01H[=3h[2J[01;01HBdsDxe: failed to load Boot0001 "UEFI QEMU DVD-ROM QM00005 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x2,0xFFFF,0x0): Not Found
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+[mushix] Starting up...
+Image handle: 0x000000007E3C8598
+efi_system_table: 0x000000007f9ee018
+image_base: 0x0000000140000000
+image_size: 0x00000000000A7000
+[INFO] src/main.rs:37 : Hello, Non-UEFI world!
+[INFO] src/init.rs:96 : Total memory size: 4053 MiB
+[INFO] src/init.rs:82 : HPET is at 0x00000000fed00000
+[INFO] src/init.rs:110: ECAM: bus 0-255 is mapped at 0xb0000000
+[INFO] src/xhci.rs:95 : Xhci found at: pci/bus/0x00/device/0x03/function/0x0
+[INFO] src/xhci.rs:347: xHCI page size: 4096
+[INFO] src/xhci.rs:349: xHCI: original num_scratchpad_bufs = 0
+[INFO] src/xhci.rs:536: starting xHC...
+[INFO] src/xhci.rs:538: xHC started runnning!
+[INFO] src/pci.rs:182: PCI device probing completed
+[INFO] src/executor.rs:167: Starting global executor
+[INFO] src/executor.rs:91 : Executor started
+[INFO] src/xhci.rs:106: xHCI  cap_regs.MaxSlots = 64
+[INFO] src/xhci.rs:110: xHCI  op_regs.USBSTS = 0x0
+[INFO] src/xhci.rs:114: xHCI  rt_regs.MFINDEX = 0xeb
+[INFO] src/xhci.rs:118: portsc values for port 1..9
+[INFO] src/xhci.rs:141: xHCI: port 5 is connected 
+[INFO] src/xhci.rs:151: xhci: resetting port 5
+[INFO] src/xhci.rs:153: xhci: port 5 has been reset
+[INFO] src/xhci.rs:158: xhci: port 5 is enabled
+[INFO] src/main.rs:45 : 100 hpet.main_counter = 23.589ms
+[INFO] src/main.rs:52 : 200 hpet.main_counter = 27.808ms
+[INFO] src/main.rs:63 : started to monitor serial port
+[INFO] src/xhci.rs:627: unhandled event: GenericTrbEntry { data: Volatile { value: 83886080 }, option: Volatile { value: 16777216 }, control: Volatile { value: 34817 } }
+[INFO] src/xhci.rs:143: xHCI: slot 1 is assigned for port 5
+[INFO] src/xhci.rs:813: Command Completion Event with error code: 5
+[INFO] src/executor.rs:99 : Task completed: Task(src/xhci.rs:102): Err("Command Completion Event with error code")
+[INFO] src/main.rs:45 : 101 hpet.main_counter = 1.02752s
+[INFO] src/main.rs:45 : 102 hpet.main_counter = 2.029582s
+[INFO] src/main.rs:52 : 201 hpet.main_counter = 2.031862s
+[INFO] src/main.rs:45 : 103 hpet.main_counter = 3.031858s
+[INFO] src/main.rs:52 : 202 hpet.main_counter = 4.033934s
+[INFO] src/executor.rs:99 : Task completed: Task(src/main.rs:72): Ok(())
+[INFO] src/main.rs:52 : 203 hpet.main_counter = 6.036036s
+[INFO] src/executor.rs:99 : Task completed: Task(src/main.rs:73): Ok(())

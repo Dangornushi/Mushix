@@ -2,54 +2,81 @@
 #![no_main]
 #![no_std]
 
-use core::fmt::Write;
 use core::panic::PanicInfo;
-use core::writeln;
-use mushix::graphics::{draw_test_pattern, fill_rect, Bitmap};
+use core::time::Duration;
+use mushix::error;
+use mushix::executor::{sleep, spawn_global, start_global_executor};
+use mushix::hpet::global_timestamp;
+use mushix::info;
+use mushix::init::{init_allocator, init_basic_runtime, init_display, init_hpet, init_pci};
+use mushix::print::set_global_vram;
+use mushix::println;
 use mushix::qemu::exit_qemu;
 use mushix::qemu::QemuExitCode;
-use mushix::uefi::{
-    exit_from_efi_boot_services, init_vram, EfiHandle, EfiMemoryType, EfiSystemTable,
-    MemoryMapHolder, VramTextWriter,
-};
-use mushix::x86::hlt;
+use mushix::serial::SerialPort;
+use mushix::uefi::{init_vram, locate_loaded_image_protocol, EfiHandle, EfiSystemTable};
+use mushix::x86::init_exceptions;
+use mushix::x86::trigger_debug_interrupt;
 
 #[no_mangle]
 fn efi_main(image_handle: EfiHandle, efi_system_table: &EfiSystemTable) {
+    println!("[mushix] Starting up...");
+    println!("Image handle: {:#018X}", image_handle);
+    println!("efi_system_table: {:#p}", efi_system_table);
+    let loaded_image_protocol = locate_loaded_image_protocol(image_handle, efi_system_table)
+        .expect("failed to get LoadedImageProtocol");
+    println!("image_base: {:#018X}", loaded_image_protocol.image_base);
+    println!("image_size: {:#018X}", loaded_image_protocol.image_size);
     let mut vram = init_vram(efi_system_table).expect("failed to init vram");
-    let vw = vram.width();
-    let vh = vram.height();
-    draw_test_pattern(&mut vram);
-
-    let mut w = VramTextWriter::new(&mut vram);
-    for i in 0..4 {
-        writeln!(w, "i = {i}").unwrap();
-    }
-
-    let mut memory_map = MemoryMapHolder::new();
-    let status = efi_system_table
-        .boot_services()
-        .get_memory_map(&mut memory_map);
-    let mut total_memory_pages = 0;
-    for e in memory_map.iter() {
-        if e.memory_type() != EfiMemoryType::CONVENTIONAL_MEMORY {
-            continue;
+    init_display(&mut vram);
+    set_global_vram(vram);
+    let mut acpi = efi_system_table
+        .acpi_table()
+        .expect("failed to get ACPI table");
+    let memory_map = init_basic_runtime(image_handle, efi_system_table);
+    info!("Hello, Non-UEFI world!");
+    init_allocator(&memory_map);
+    let (_gdt, _idt) = init_exceptions();
+    init_hpet(acpi);
+    init_pci(acpi);
+    let t0 = global_timestamp();
+    let task1 = async move {
+        for i in 100..=103 {
+            info!("{i} hpet.main_counter = {:?}", global_timestamp() - t0);
+            sleep(Duration::from_secs(1)).await;
         }
-        total_memory_pages += e.number_of_pages();
-    }
-    let total_memory_size_mib = total_memory_pages * 4096 / 1024 / 1024;
-    writeln!(w, "Total memory size: {total_memory_size_mib} MiB").unwrap();
-
-    exit_from_efi_boot_services(image_handle, efi_system_table, &mut memory_map);
-
-    writeln!(w, "Hello, Non-UEFI world!").unwrap();
-
-    loop {
-        hlt();
-    }
+        Ok(())
+    };
+    let task2 = async move {
+        for i in 200..=203 {
+            info!("{i} hpet.main_counter = {:?}", global_timestamp() - t0);
+            sleep(Duration::from_secs(2)).await;
+        }
+        Ok(())
+    };
+    let serial_task = async {
+        let sp = SerialPort::default();
+        if let Err(e) = sp.loopback_test() {
+            error!("{e:?}");
+            return Err("serial loopback test failed");
+        }
+        info!("started to monitor serial port");
+        loop {
+            if let Some(v) = sp.try_read() {
+                let c = char::from_u32(v as u32);
+                info!("serial input: {v:#04X} = {c:?}");
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    };
+    spawn_global(task1);
+    spawn_global(task2);
+    spawn_global(serial_task);
+    start_global_executor()
 }
 
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
+fn panic(info: &PanicInfo) -> ! {
+    println!("panic: {info}");
     exit_qemu(QemuExitCode::Fail);
 }
