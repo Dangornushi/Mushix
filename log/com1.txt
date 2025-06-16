@@ -2,42 +2,43 @@
 BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
 BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
 [mushix] Starting up...
-Image handle: 0x000000007E3C8598
+Image handle: 0x000000007EAED998
 efi_system_table: 0x000000007f9ee018
 image_base: 0x0000000140000000
-image_size: 0x00000000000A7000
+image_size: 0x00000000000BB000
 [INFO] src/main.rs:37 : Hello, Non-UEFI world!
 [INFO] src/init.rs:96 : Total memory size: 4053 MiB
 [INFO] src/init.rs:82 : HPET is at 0x00000000fed00000
 [INFO] src/init.rs:110: ECAM: bus 0-255 is mapped at 0xb0000000
-[INFO] src/xhci.rs:95 : Xhci found at: pci/bus/0x00/device/0x03/function/0x0
-[INFO] src/xhci.rs:347: xHCI page size: 4096
-[INFO] src/xhci.rs:349: xHCI: original num_scratchpad_bufs = 0
-[INFO] src/xhci.rs:536: starting xHC...
-[INFO] src/xhci.rs:538: xHC started runnning!
+[INFO] src/xhci.rs:101: Xhci found at: pci/bus/0x00/device/0x03/function/0x0
+[INFO] src/xhci.rs:539: xHCI page size: 4096
+[INFO] src/xhci.rs:541: xHCI: original num_scratchpad_bufs = 0
+[INFO] src/xhci.rs:728: starting xHC...
+[INFO] src/xhci.rs:730: xHC started runnning!
 [INFO] src/pci.rs:182: PCI device probing completed
 [INFO] src/executor.rs:167: Starting global executor
 [INFO] src/executor.rs:91 : Executor started
-[INFO] src/xhci.rs:106: xHCI  cap_regs.MaxSlots = 64
-[INFO] src/xhci.rs:110: xHCI  op_regs.USBSTS = 0x0
-[INFO] src/xhci.rs:114: xHCI  rt_regs.MFINDEX = 0xeb
-[INFO] src/xhci.rs:118: portsc values for port 1..9
-[INFO] src/xhci.rs:141: xHCI: port 5 is connected 
-[INFO] src/xhci.rs:151: xhci: resetting port 5
-[INFO] src/xhci.rs:153: xhci: port 5 has been reset
-[INFO] src/xhci.rs:158: xhci: port 5 is enabled
-[INFO] src/main.rs:45 : 100 hpet.main_counter = 23.589ms
-[INFO] src/main.rs:52 : 200 hpet.main_counter = 27.808ms
+[INFO] src/main.rs:45 : 100 hpet.main_counter = 9.967ms
+[INFO] src/main.rs:52 : 200 hpet.main_counter = 14.088ms
 [INFO] src/main.rs:63 : started to monitor serial port
-[INFO] src/xhci.rs:627: unhandled event: GenericTrbEntry { data: Volatile { value: 83886080 }, option: Volatile { value: 16777216 }, control: Volatile { value: 34817 } }
-[INFO] src/xhci.rs:143: xHCI: slot 1 is assigned for port 5
-[INFO] src/xhci.rs:813: Command Completion Event with error code: 5
-[INFO] src/executor.rs:99 : Task completed: Task(src/xhci.rs:102): Err("Command Completion Event with error code")
-[INFO] src/main.rs:45 : 101 hpet.main_counter = 1.02752s
-[INFO] src/main.rs:45 : 102 hpet.main_counter = 2.029582s
-[INFO] src/main.rs:52 : 201 hpet.main_counter = 2.031862s
-[INFO] src/main.rs:45 : 103 hpet.main_counter = 3.031858s
-[INFO] src/main.rs:52 : 202 hpet.main_counter = 4.033934s
+[INFO] src/xhci.rs:855: unhandled event: GenericTrbEntry { data: Volatile { value: 33554432 }, option: Volatile { value: 16777216 }, control: Volatile { value: 34817 } }
+[INFO] src/xhci.rs:151: xHCI: slot 1 is assigned for port 2
+[INFO] src/xhci.rs:168: Descriptor: UsbDeviceDescriptor { desc_length: 18, desc_type: 1, version: 768, device_class: 0, device_subclass: 0, device_protocol: 0, max_packet_size: 9, vendor_id: 18164, product_id: 1, device_version: 0, manufacturer_index: 1, product_index: 2, serial_idx: 3, num_of_config: 1 }
+[INFO] src/xhci.rs:171: xHCI: Device VID: 0x46F4, PID: 0x0001
+[INFO] src/xhci.rs:219: xHCI: V/P/S: Some("QEMU")/Some("QEMU USB HARDDRIVE")/Some("1-0000:00:03.0-2")
+[INFO] src/xhci.rs:232: xHCI: Interface descriptor: 8,  6
+[INFO] src/xhci.rs:855: unhandled event: GenericTrbEntry { data: Volatile { value: 83886080 }, option: Volatile { value: 16777216 }, control: Volatile { value: 34817 } }
+[INFO] src/xhci.rs:151: xHCI: slot 2 is assigned for port 5
+[INFO] src/xhci.rs:168: Descriptor: UsbDeviceDescriptor { desc_length: 18, desc_type: 1, version: 512, device_class: 0, device_subclass: 0, device_protocol: 0, max_packet_size: 64, vendor_id: 1575, product_id: 1, device_version: 0, manufacturer_index: 1, product_index: 4, serial_idx: 11, num_of_config: 1 }
+[INFO] src/xhci.rs:171: xHCI: Device VID: 0x0627, PID: 0x0001
+[INFO] src/xhci.rs:219: xHCI: V/P/S: Some("QEMU")/Some("QEMU USB Keyboard")/Some("68284-0000:00:03.0-1")
+[INFO] src/xhci.rs:232: xHCI: Interface descriptor: 3,  1
+[INFO] src/executor.rs:99 : Task completed: Task(src/xhci.rs:108): Ok(())
+[INFO] src/main.rs:45 : 101 hpet.main_counter = 1.013754s
+[INFO] src/main.rs:45 : 102 hpet.main_counter = 2.016064s
+[INFO] src/main.rs:52 : 201 hpet.main_counter = 2.018282s
+[INFO] src/main.rs:45 : 103 hpet.main_counter = 3.018334s
+[INFO] src/main.rs:52 : 202 hpet.main_counter = 4.020237s
 [INFO] src/executor.rs:99 : Task completed: Task(src/main.rs:72): Ok(())
-[INFO] src/main.rs:52 : 203 hpet.main_counter = 6.036036s
+[INFO] src/main.rs:52 : 203 hpet.main_counter = 6.022608s
 [INFO] src/executor.rs:99 : Task completed: Task(src/main.rs:73): Ok(())
