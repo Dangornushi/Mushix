@@ -26,6 +26,7 @@ use core::{
 use crate::{
     allocator::ALLOCATOR,
     bits::extract_bits,
+    cbw::CommandBlockWrapper,
     executor::spawn_global,
     executor::yield_execution,
     info,
@@ -165,7 +166,6 @@ impl PciXhciDriver {
             } else {
                 device_descriptor = Ok(*device_descriptor.as_ref().unwrap());
                 let device_descriptor = device_descriptor.unwrap();
-                info!("Descriptor: {device_descriptor:?}");
                 let vid = device_descriptor.vendor_id;
                 let pid = device_descriptor.product_id;
                 info!("xHCI: Device VID: {vid:#06X}, PID: {pid:#06X}");
@@ -220,6 +220,30 @@ impl PciXhciDriver {
                     let descriptors =
                         Self::request_config_descriptor_and_rest(&xhc, slot, &mut ctrl_ep_ring)
                             .await?;
+
+                    for desc in &descriptors {
+                        match desc {
+                            UsbDescriptor::Interface(interface) => {
+                                if interface.interface_class == 8 && // Mass Storage Class
+                                           interface.interface_subclass == 6 && // SCSI transparent command set
+                                           interface.interface_protocol == 0x50
+                                {
+                                    // Bulk-Only Transport
+                                    info!("xHCI: USB Mass Storage device detected");
+                                    Self::handle_mass_storage_device(
+                                        &xhc,
+                                        slot,
+                                        &mut ctrl_ep_ring,
+                                        &descriptors,
+                                    )
+                                    .await?;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    /*
                     match &descriptors[1] {
                         UsbDescriptor::Config(config) => {
                             info!(
@@ -246,12 +270,242 @@ impl PciXhciDriver {
                                 desc_len, desc_type
                             );
                         }
-                    }
+                    }*/
                 }
             }
         }
         Ok(())
     }
+    // Mass Storageデバイスの処理
+    async fn handle_mass_storage_device(
+        xhc: &Rc<Controller>,
+        slot: u8,
+        ctrl_ep_ring: &mut CommandRing,
+        descriptors: &[UsbDescriptor],
+    ) -> Result<()> {
+        // エンドポイントを探す
+        let mut bulk_in_ep = None;
+        let mut bulk_out_ep = None;
+        let mut last_config: Option<ConfigDescriptor> = None;
+        let mut usb_interface: Option<InterfaceDescriptor> = None;
+        let mut ep_desc_list: Vec<EndpointDescriptor> = Vec::new();
+
+        for desc in descriptors {
+            match desc {
+                UsbDescriptor::Config(ep) => {
+                    if usb_interface.is_some() {
+                        break;
+                    }
+                    last_config = Some(*ep);
+                    ep_desc_list.clear();
+                }
+                UsbDescriptor::Interface(e) => {
+                    usb_interface = Some(*e);
+                }
+                UsbDescriptor::Endpoint(ep) => {
+                    if ep.attributes & 0x03 == 2 {
+                        // Bulk transfer
+                        if ep.endpoint_address & 0x80 != 0 {
+                            // IN endpoint
+                            bulk_in_ep = Some(ep);
+                        } else {
+                            // OUT endpoint
+                            bulk_out_ep = Some(ep);
+                        }
+                    }
+                    ep_desc_list.push(*ep);
+                }
+                _ => {}
+            }
+        }
+        let config_desc = last_config.ok_or("Config descriptor not found")?;
+        let interface_desc = usb_interface.ok_or("Interface descriptor not found")?;
+        let bulk_in = bulk_in_ep.ok_or("Bulk IN endpoint not found")?;
+        let bulk_out = bulk_out_ep.ok_or("Bulk OUT endpoint not found")?;
+        info!(
+            "xHCI: Found bulk endpoints - IN: {:#x}, OUT: {:#x}",
+            bulk_in.endpoint_address, bulk_out.endpoint_address
+        );
+
+        // Configuration を設定
+        xhc.request_set_config(slot, ctrl_ep_ring, config_desc.config_value())
+            .await?;
+        info!("xHCI: Device configured");
+
+        // Bulk エンドポイントを設定
+        let bulk_out_dci = ((bulk_out.endpoint_address & 0x0F) * 2) as usize;
+        let bulk_in_dci = ((bulk_in.endpoint_address & 0x0F) * 2 + 1) as usize;
+
+        let mut bulk_out_ring =
+            Self::configure_bulk_endpoint(xhc, slot, bulk_out, bulk_out_dci).await?;
+        let mut bulk_in_ring =
+            Self::configure_bulk_endpoint(xhc, slot, bulk_in, bulk_in_dci).await?;
+
+        info!("xHCI: Bulk endpoints configured");
+
+        // SCSI INQUIRYコマンドでデバイス情報を取得
+        Self::scsi_read_10(
+            xhc,
+            slot,
+            &mut bulk_in_ring,
+            &mut bulk_out_ring,
+            bulk_in_dci,
+            bulk_out_dci,
+            0,
+            1, // 1セクタ分のデータを読み取る
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    // SCSI READ(10) コマンドの追加
+    async fn scsi_read_10(
+        xhc: &Rc<Controller>,
+        slot: u8,
+        bulk_in_ring: &mut CommandRing,
+        bulk_out_ring: &mut CommandRing,
+        bulk_in_dci: usize,
+        bulk_out_dci: usize,
+        lba: u32,
+        transfer_length: u16,
+    ) -> Result<Vec<u8>> {
+        info!(
+            "xHCI: Starting SCSI READ(10) command - LBA: {}, Length: {}",
+            lba, transfer_length
+        );
+
+        // CBW作成 (31バイト) - READ(10)用
+        let mut cbw_data = vec![0u8; 31];
+        cbw_data[0..4].copy_from_slice(&0x43425355u32.to_le_bytes()); // "USBC"
+        cbw_data[4..8].copy_from_slice(&3u32.to_le_bytes()); // CBWタグ
+        cbw_data[8..12].copy_from_slice(&((transfer_length as u32) * 512).to_le_bytes()); // データ転送長
+        cbw_data[12] = 0x80; // bmCBWFlags (Data-In)
+        cbw_data[13] = 0; // bCBWLUN
+        cbw_data[14] = 10; // bCBWCBLength (READ(10)コマンド長)
+
+        // SCSI READ(10)コマンド
+        cbw_data[15] = 0x28; // READ(10) オペレーションコード
+        cbw_data[16] = 0x00; // RelAdr=0, FUA=0, DPO=0
+        cbw_data[17..21].copy_from_slice(&lba.to_be_bytes()); // LBA (ビッグエンディアン)
+        cbw_data[21] = 0x00; // GroupNumber
+        cbw_data[22..24].copy_from_slice(&transfer_length.to_be_bytes()); // TransferLength (ビッグエンディアン)
+        cbw_data[24] = 0x00; // Control
+
+        let cbw_data = Box::into_pin(cbw_data.into_boxed_slice());
+
+        // 1. CBWをBulk OUT転送で送信
+        let trb_ptr = bulk_out_ring.push(NormalTrb::new_out_generic(cbw_data.as_ref()).into())?;
+        xhc.notify_ep(slot, bulk_out_dci)?;
+        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+
+        // 2. データをBulk IN転送で受信
+        let data_size = (transfer_length as usize) * 512;
+        let read_data = vec![0u8; data_size];
+        let mut read_data = Box::into_pin(read_data.into_boxed_slice());
+
+        info!("xHCI: Receiving {} bytes via Bulk IN", data_size);
+        let trb_ptr = bulk_in_ring.push(NormalTrb::new_in(read_data.as_mut()).into())?;
+        xhc.notify_ep(slot, bulk_in_dci)?;
+        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+
+        // 3. CSW受信
+        let csw = vec![0u8; 13];
+        let mut csw = Box::into_pin(csw.into_boxed_slice());
+
+        let trb_ptr = bulk_in_ring.push(NormalTrb::new_in(csw.as_mut()).into())?;
+        xhc.notify_ep(slot, bulk_in_dci)?;
+        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+
+        // データの最初の部分をログ出力
+        info!(
+            "xHCI: Read data (first 64 bytes): {:02x?}",
+            &read_data[..64.min(data_size)]
+        );
+
+        Ok(read_data.to_vec())
+    }
+
+    // Bulk エンドポイントの設定
+    async fn configure_bulk_endpoint(
+        xhc: &Rc<Controller>,
+        slot: u8,
+        ep_desc: &EndpointDescriptor,
+        dci: usize,
+    ) -> Result<CommandRing> {
+        let mut input_ctrl_ctx = InputControlContext::default();
+        input_ctrl_ctx.add_context(0)?; // Slot context
+        input_ctrl_ctx.add_context(dci)?; // Endpoint context
+
+        let mut input_context = Box::pin(InputContext::default());
+        input_context.as_mut().set_input_ctrl_ctx(input_ctrl_ctx)?;
+
+        let ep_ring = CommandRing::default();
+        let ep_type = if ep_desc.endpoint_address & 0x80 != 0 {
+            EndpointType::BulkIn
+        } else {
+            EndpointType::BulkOut
+        };
+
+        // エンドポイント設定前にデバイスの状態を確認
+        info!("Configuring endpoint DCI {} for slot {}", dci, slot);
+
+        let ep_ctx = EndpointContext::new_bulk_endpoint(
+            ep_desc.max_packet_size,
+            ep_ring.ring_phys_addr(),
+            ep_type,
+        )?;
+
+        input_context.as_mut().set_ep_ctx(dci, ep_ctx)?;
+
+        // 最大DCIを更新
+        input_context.as_mut().set_last_valid_dci(dci)?;
+
+        let cmd = GenericTrbEntry::cmd_configure_endpoint(input_context.as_ref(), slot);
+        let result = xhc.send_command(cmd).await;
+
+        match &result {
+            Ok(_) => info!("Configure Endpoint command succeeded"),
+            Err(e) => info!("Configure Endpoint command failed: {:?}", e),
+        }
+
+        result?.cmd_result_ok()?;
+
+        Ok(ep_ring)
+    }
+    /// SCSI INQUIRYコマンド
+
+    // READ CAPACITY応答の解析
+    fn parse_read_capacity_response(data: &[u8]) -> Result<(u32, u32)> {
+        if data.len() < 8 {
+            return Err("READ CAPACITY response too short");
+        }
+
+        // READ CAPACITY(10)レスポンス構造：
+        // [0-3]: 最後のLBA (ビッグエンディアン)
+        // [4-7]: ブロックサイズ (ビッグエンディアン)
+        let last_lba = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let block_size = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+
+        let total_blocks = last_lba + 1; // LBAは0ベースなので+1
+        let total_size_mb = (total_blocks as u64 * block_size as u64) / (1024 * 1024);
+
+        info!("xHCI: READ CAPACITY Response:");
+        info!("  Last LBA: {} (0x{:08X})", last_lba, last_lba);
+        info!("  Block Size: {} bytes", block_size);
+        info!("  Total Blocks: {}", total_blocks);
+        info!("  Total Size: {} MB", total_size_mb);
+        info!("  Raw data: {:02x?}", data);
+
+        Ok((last_lba, block_size))
+    }
+
     async fn init_port(xhc: &Rc<Controller>, port: usize) -> Result<u8> {
         let portsc = xhc.regs.portsc.get(port).ok_or("Port not found")?;
         //info!("xHCI: resetting port {port}");
@@ -587,7 +841,20 @@ impl EndpointContext {
         ep.average_trb_length = 8;
         Ok(ep)
     }
-
+    fn new_bulk_endpoint(
+        max_packet_size: u16,
+        tr_deque_ptr: u64,
+        ep_type: EndpointType,
+    ) -> Result<Self> {
+        let mut ep = Self::new();
+        ep.set_ep_type(ep_type)?;
+        ep.set_dequeue_cycle_state(true)?;
+        ep.set_error_count(3)?;
+        ep.set_max_packet_size(max_packet_size);
+        ep.set_ring_deque_pointer(tr_deque_ptr)?;
+        ep.average_trb_length = max_packet_size;
+        Ok(ep)
+    }
     fn set_ring_deque_pointer(&mut self, tr_deque_ptr: u64) -> Result<()> {
         self.tr_deque_ptr.write_bits(4, 60, tr_deque_ptr >> 4)
     }
@@ -767,6 +1034,33 @@ impl Controller {
             .lock()
             .set_output_context(slot, output_context);
     }
+    // Configuration設定
+    pub async fn request_set_config(
+        &self,
+        slot: u8,
+        ctrl_ep_ring: &mut CommandRing,
+        config_value: u8,
+    ) -> Result<()> {
+        ctrl_ep_ring.push(
+            SetupStageTrb::new(
+                0,
+                SetupStageTrb::REQ_SET_CONFIGURATION,
+                config_value as u16,
+                0,
+                0,
+            )
+            .into(),
+        )?;
+
+        let trb_ptr = ctrl_ep_ring.push(StatusStageTrb::new_in().into())?;
+
+        self.notify_ep(slot, 1)?;
+        EventFuture::new_for_trb(&self.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+        Ok(())
+    }
+
     async fn request_descriptor<T: Sized>(
         &self,
         slot: u8,
@@ -1068,6 +1362,14 @@ impl GenericTrbEntry {
     fn cmd_address_device(input_context: Pin<&InputContext>, slot: u8) -> Self {
         let mut trb = Self::default();
         trb.set_trb_type(TrbType::AddressDeviceCommand);
+        trb.data
+            .write(input_context.get_ref() as *const InputContext as u64);
+        trb.set_slot_id(slot);
+        trb
+    }
+    fn cmd_configure_endpoint(input_context: Pin<&InputContext>, slot: u8) -> Self {
+        let mut trb = Self::default();
+        trb.set_trb_type(TrbType::ConfigureEndpointCommand);
         trb.data
             .write(input_context.get_ref() as *const InputContext as u64);
         trb.set_slot_id(slot);
@@ -1532,6 +1834,15 @@ impl DataStageTrb {
                 | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET,
         }
     }
+    pub fn new_out<T: Sized>(buf: Pin<&[T]>) -> Self {
+        Self {
+            buf: buf.as_ptr() as u64,
+            option: (buf.len() * size_of::<T>()) as u32,
+            control: (TrbType::DataStage as u32) << 10
+                // DATA_DIR_INビットなし = OUT方向
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION,
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -1548,6 +1859,16 @@ impl StatusStageTrb {
             reserved: 0,
             option: 0,
             control: (TrbType::StatusStage as u32) << 10,
+        }
+    }
+    fn new_in() -> Self {
+        Self {
+            reserved: 0,
+            option: 0,
+            control: (TrbType::StatusStage as u32) << 10
+                | GenericTrbEntry::CTRL_BIT_DATA_DIR_IN
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET,
         }
     }
 }
@@ -1655,5 +1976,48 @@ impl<'a> Iterator for DescriptorIterator<'a> {
             self.index += desc_len as usize;
             Some(desc)
         }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[repr(C, align(16))]
+pub struct NormalTrb {
+    buf: u64,
+    option: u32,
+    control: u32,
+}
+
+impl NormalTrb {
+    pub fn new_in<T: Sized>(buf: Pin<&mut [T]>) -> Self {
+        Self {
+            buf: buf.as_ptr() as u64,
+            option: (buf.len() * size_of::<T>()) as u32,
+            control: (TrbType::Normal as u32) << 10
+                | GenericTrbEntry::CTRL_BIT_DATA_DIR_IN
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET,
+        }
+    }
+    pub fn new_out(buf: Pin<Box<CommandBlockWrapper>>) -> Self {
+        Self {
+            buf: buf.as_ref().get_ref() as *const CommandBlockWrapper as u64, // CBW全体のアドレス
+            option: size_of::<CommandBlockWrapper>() as u32,                  // 配列の長さを使用
+            control: (TrbType::Normal as u32) << 10
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION,
+        }
+    }
+    pub fn new_out_generic<T: Sized>(buf: Pin<&[T]>) -> Self {
+        Self {
+            buf: buf.as_ptr() as u64,
+            option: (buf.len() * size_of::<T>()) as u32,
+            control: (TrbType::Normal as u32) << 10
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION,
+        }
+    }
+}
+
+impl From<NormalTrb> for GenericTrbEntry {
+    fn from(trb: NormalTrb) -> GenericTrbEntry {
+        unsafe { transmute(trb) }
     }
 }

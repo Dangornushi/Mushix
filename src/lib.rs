@@ -11,6 +11,7 @@
 pub mod acpi;
 pub mod allocator;
 pub mod bits;
+pub mod cbw;
 pub mod executor;
 pub mod graphics;
 pub mod hpet;
