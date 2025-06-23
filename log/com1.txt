@@ -2,48 +2,49 @@
 BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
 BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
 [mushix] Starting up...
-Image handle: 0x000000007EAED998
-efi_system_table: 0x000000007f9ee018
-image_base: 0x0000000140000000
-image_size: 0x00000000000C0000
-[INFO] src/main.rs:37 : Hello, Non-UEFI world!
 [INFO] src/init.rs:96 : Total memory size: 4053 MiB
 [INFO] src/init.rs:82 : HPET is at 0x00000000fed00000
 [INFO] src/init.rs:110: ECAM: bus 0-255 is mapped at 0xb0000000
-[INFO] src/xhci.rs:102: Xhci found at: pci/bus/0x00/device/0x03/function/0x0
-[INFO] src/xhci.rs:793: xHCI page size: 4096
-[INFO] src/xhci.rs:795: xHCI: original num_scratchpad_bufs = 0
-[INFO] src/xhci.rs:995: starting xHC...
-[INFO] src/xhci.rs:997: xHC started runnning!
+[INFO] src/xhci.rs:104: Xhci found at: pci/bus/0x00/device/0x03/function/0x0
+[INFO] src/xhci.rs:1093: xHCI page size: 4096
+[INFO] src/xhci.rs:1095: xHCI: original num_scratchpad_bufs = 0
+[INFO] src/xhci.rs:1315: starting xHC...
+[INFO] src/xhci.rs:1317: xHC started runnning!
 [INFO] src/pci.rs:182: PCI device probing completed
 [INFO] src/executor.rs:167: Starting global executor
 [INFO] src/executor.rs:91 : Executor started
-[INFO] src/main.rs:45 : 100 hpet.main_counter = 9.915ms
-[INFO] src/main.rs:52 : 200 hpet.main_counter = 13.756ms
-[INFO] src/main.rs:63 : started to monitor serial port
-[INFO] src/xhci.rs:1149: unhandled event: GenericTrbEntry { data: Volatile { value: 33554432 }, option: Volatile { value: 16777216 }, control: Volatile { value: 34817 } }
-[INFO] src/xhci.rs:152: xHCI: slot 1 is assigned for port 2
-[INFO] src/xhci.rs:171: xHCI: Device VID: 0x46F4, PID: 0x0001
-[INFO] src/xhci.rs:219: xHCI: V/P/S: Some("QEMU")/Some("QEMU USB HARDDRIVE")/Some("1-0000:00:03.0-2")
-[INFO] src/xhci.rs:232: xHCI: USB Mass Storage device detected
-[INFO] src/xhci.rs:325: xHCI: Found bulk endpoints - IN: 0x81, OUT: 0x2
-[INFO] src/xhci.rs:333: xHCI: Device configured
-[INFO] src/xhci.rs:457: Configuring endpoint DCI 4 for slot 1
-[INFO] src/xhci.rs:474: Configure Endpoint command succeeded
-[INFO] src/xhci.rs:457: Configuring endpoint DCI 3 for slot 1
-[INFO] src/xhci.rs:474: Configure Endpoint command succeeded
-[INFO] src/xhci.rs:344: xHCI: Bulk endpoints configured
-[INFO] src/xhci.rs:373: xHCI: Starting SCSI READ(10) command - LBA: 0, Length: 1
-[INFO] src/xhci.rs:409: xHCI: Receiving 512 bytes via Bulk IN
-[INFO] src/xhci.rs:427: xHCI: Read data (first 64 bytes): [44, 41, 4e, 47, 4f, 4d, 55, 53, 48, 49, 0a, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]
-[INFO] src/xhci.rs:1149: unhandled event: GenericTrbEntry { data: Volatile { value: 83886080 }, option: Volatile { value: 16777216 }, control: Volatile { value: 34816 } }
-[INFO] src/xhci.rs:152: xHCI: slot 2 is assigned for port 5
-[INFO] src/xhci.rs:171: xHCI: Device VID: 0x0627, PID: 0x0001
-[INFO] src/xhci.rs:219: xHCI: V/P/S: Some("QEMU")/Some("QEMU USB Keyboard")/Some("68284-0000:00:03.0-1")
-[INFO] src/executor.rs:99 : Task completed: Task(src/xhci.rs:109): Ok(())
-[INFO] src/main.rs:45 : 101 hpet.main_counter = 1.01343s
-[INFO] src/main.rs:45 : 102 hpet.main_counter = 2.015573s
-[INFO] src/main.rs:52 : 201 hpet.main_counter = 2.018085s
-[INFO] src/main.rs:45 : 103 hpet.main_counter = 3.018091s
-[INFO] src/main.rs:52 : 202 hpet.main_counter = 4.020096s
-[INFO] src/executor.rs:99 : Task completed: Task(src/main.rs:72): Ok(())
+[INFO] src/main.rs:43 : started to monitor serial port
+[INFO] src/xhci.rs:1848: TRB address mismatch: expected 0x17ff75000, got 0x2000000
+[INFO] src/xhci.rs:160: xHCI: slot 1 is assigned for port 2
+[INFO] src/xhci.rs:179: xHCI: Device VID: 0x46F4, PID: 0x0001
+[INFO] src/xhci.rs:227: xHCI: V/P/S: Some("QEMU")/Some("QEMU USB HARDDRIVE")/Some("1-0000:00:03.0-2")
+[INFO] src/xhci.rs:362: xHCI: Found bulk endpoints - IN: 0x81, OUT: 0x2
+[INFO] src/xhci.rs:655: Configure Endpoint command succeeded
+[INFO] src/xhci.rs:655: Configure Endpoint command succeeded
+[INFO] src/xhci.rs:521: CBW TRB pushed at address: 0x17ff69000
+[INFO] src/xhci.rs:525: After Doorbell: USBSTS=0x8 => HCHalted=false, HostErr=false, EventInt=false, PortChg=true, HostCtrEvt=false
+[INFO] src/xhci.rs:534: Waiting for CBW transfer event at 0x17ff69000
+[INFO] src/xhci.rs:539: xHCI: READ(10) CBW sent successfully
+[INFO] src/xhci.rs:547: Data TRB pushed at address: 0x17ff65000
+[INFO] src/xhci.rs:551: After Doorbell: USBSTS=0x8 => HCHalted=false, HostErr=false, EventInt=false, PortChg=true, HostCtrEvt=false
+[INFO] src/xhci.rs:560: Waiting for data transfer event at 0x17ff65000
+[INFO] src/xhci.rs:565: xHCI: Data received successfully
+[INFO] src/xhci.rs:572: CSW TRB pushed at address: 0x17ff65010
+[INFO] src/xhci.rs:576: After Doorbell: USBSTS=0x8 => HCHalted=false, HostErr=false, EventInt=false, PortChg=true, HostCtrEvt=false
+[INFO] src/xhci.rs:585: Waiting for CSW transfer event at 0x17ff65010
+[INFO] src/xhci.rs:590: xHCI: CSW received successfully
+[INFO] src/xhci.rs:597: CSW: signature=0x53425355, tag=3, status=0
+[INFO] src/xhci.rs:816: === Master Boot Record (MBR) Analysis ===
+[INFO] src/xhci.rs:822: Boot Signature: 0x0 (Invalid MBR)
+[INFO] src/xhci.rs:833: === Partition Table ===
+[INFO] src/xhci.rs:860: Partition 1: Boot=0x0, Type=0x0 (Empty), LBA=0, Sectors=0
+[INFO] src/xhci.rs:860: Partition 2: Boot=0x0, Type=0x0 (Empty), LBA=0, Sectors=0
+[INFO] src/xhci.rs:860: Partition 3: Boot=0x0, Type=0x0 (Empty), LBA=0, Sectors=0
+[INFO] src/xhci.rs:860: Partition 4: Boot=0x0, Type=0x0 (Empty), LBA=0, Sectors=0
+[INFO] src/xhci.rs:908: === ASCII Strings Found ===
+[INFO] src/xhci.rs:921:   Offset 0x0: "DANGOMUSHI"
+[INFO] src/xhci.rs:1848: TRB address mismatch: expected 0x17ff75040, got 0x5000000
+[INFO] src/xhci.rs:160: xHCI: slot 2 is assigned for port 5
+[INFO] src/xhci.rs:179: xHCI: Device VID: 0x0627, PID: 0x0001
+[INFO] src/xhci.rs:227: xHCI: V/P/S: Some("QEMU")/Some("QEMU USB Keyboard")/Some("68284-0000:00:03.0-1")
+[INFO] src/executor.rs:99 : Task completed: Task(src/xhci.rs:111): Ok(())

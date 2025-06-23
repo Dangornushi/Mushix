@@ -20,6 +20,8 @@ qemu-system-x86_64 \
     -device usb-kbd \
     -device usb-storage,drive=usb \
     -drive id=usb,file=usb.img,format=raw,if=none \
+#    -device usb-storage,drive=usb2 \
+#    -drive id=usb2,file=usb2.img,format=raw,if=none \
     -device isa-debug-exit,iobase=0xf4,iosize=0x01
 
 RETCODE=$?

@@ -8,6 +8,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
+use core::sync::atomic::{fence, Ordering};
+
 use core::{
     alloc::Layout,
     cmp::max,
@@ -140,7 +142,13 @@ impl PciXhciDriver {
             let xhc = xhc.clone();
             spawn_global(async move {
                 loop {
-                    xhc.primary_event_ring.lock().poll().await?;
+                    // とりあえずポーリングは動く
+                    match xhc.primary_event_ring.lock().poll().await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            info!("Event polling error: {:?}", e);
+                        }
+                    }
                     yield_execution().await;
                 }
             })
@@ -229,7 +237,6 @@ impl PciXhciDriver {
                                            interface.interface_protocol == 0x50
                                 {
                                     // Bulk-Only Transport
-                                    info!("xHCI: USB Mass Storage device detected");
                                     Self::handle_mass_storage_device(
                                         &xhc,
                                         slot,
@@ -274,6 +281,36 @@ impl PciXhciDriver {
                 }
             }
         }
+        Ok(())
+    }
+    // Bulk-Only Mass Storage Reset実装
+    async fn bulk_only_mass_storage_reset(
+        xhc: &Rc<Controller>,
+        slot: u8,
+        ctrl_ep_ring: &mut CommandRing,
+    ) -> Result<()> {
+        // Setup Stage: Bulk-Only Mass Storage Reset
+        ctrl_ep_ring.push(
+            SetupStageTrb::new(
+                SetupStageTrb::REQ_TYPE_DIR_HOST_TO_DEVICE
+                    | SetupStageTrb::REQ_TYPE_TYPE_CLASS
+                    | SetupStageTrb::REQ_TYPE_TO_INTERFACE,
+                0xFF, // Bulk-Only Mass Storage Reset
+                0,    // wValue
+                0,    // wIndex (Interface number)
+                0,    // wLength
+            )
+            .into(),
+        )?;
+
+        // Status Stage
+        let trb_ptr = ctrl_ep_ring.push(StatusStageTrb::new_in().into())?;
+
+        xhc.notify_ep(slot, 1)?;
+        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+
         Ok(())
     }
     // Mass Storageデバイスの処理
@@ -330,20 +367,49 @@ impl PciXhciDriver {
         // Configuration を設定
         xhc.request_set_config(slot, ctrl_ep_ring, config_desc.config_value())
             .await?;
-        info!("xHCI: Device configured");
 
-        // Bulk エンドポイントを設定
-        let bulk_out_dci = ((bulk_out.endpoint_address & 0x0F) * 2) as usize;
-        let bulk_in_dci = ((bulk_in.endpoint_address & 0x0F) * 2 + 1) as usize;
+        Self::bulk_only_mass_storage_reset(xhc, slot, ctrl_ep_ring).await?;
+
+        // エンドポイント----------------------------------------------------------------
+        let bulk_out_dci = if bulk_out.endpoint_address & 0x80 == 0 {
+            // OUT エンドポイント: EP番号 * 2
+            let ep_num = bulk_out.endpoint_address & 0x0F;
+            (ep_num * 2) as usize
+        } else {
+            return Err("OUT endpoint has IN direction bit set");
+        };
+
+        let bulk_in_dci = if bulk_in.endpoint_address & 0x80 != 0 {
+            // IN エンドポイント: EP番号 * 2 + 1
+            let ep_num = bulk_in.endpoint_address & 0x0F;
+            (ep_num * 2 + 1) as usize
+        } else {
+            return Err("IN endpoint has OUT direction bit set");
+        };
+        // ------------------------------------------------------------------------
 
         let mut bulk_out_ring =
             Self::configure_bulk_endpoint(xhc, slot, bulk_out, bulk_out_dci).await?;
+
         let mut bulk_in_ring =
             Self::configure_bulk_endpoint(xhc, slot, bulk_in, bulk_in_dci).await?;
 
-        info!("xHCI: Bulk endpoints configured");
+        // Bulk エンドポイント設定後にSTALLをクリア
+        if let Some(bulk_in_ep) = bulk_in_ep {
+            xhc.clear_endpoint_halt(slot, ctrl_ep_ring, bulk_in_ep.endpoint_address)
+                .await
+                .unwrap_or_else(|e| {
+                    info!("Failed to clear bulk IN endpoint halt: {:?}", e);
+                });
+        }
 
-        // SCSI INQUIRYコマンドでデバイス情報を取得
+        if let Some(bulk_out_ep) = bulk_out_ep {
+            xhc.clear_endpoint_halt(slot, ctrl_ep_ring, bulk_out_ep.endpoint_address)
+                .await
+                .unwrap_or_else(|e| {
+                    info!("Failed to clear bulk OUT endpoint halt: {:?}", e);
+                });
+        }
         Self::scsi_read_10(
             xhc,
             slot,
@@ -352,11 +418,72 @@ impl PciXhciDriver {
             bulk_in_dci,
             bulk_out_dci,
             0,
-            1, // 1セクタ分のデータを読み取る
+            1,
         )
         .await?;
 
         Ok(())
+    }
+
+    async fn scsi_inquiry(
+        xhc: &Rc<Controller>,
+        slot: u8,
+        bulk_in_ring: &mut CommandRing,
+        bulk_out_ring: &mut CommandRing,
+        bulk_in_dci: usize,
+        bulk_out_dci: usize,
+    ) -> Result<Vec<u8>> {
+        info!("xHCI: Starting SCSI INQUIRY command");
+
+        // CBW作成 (31バイト) - INQUIRY用
+        let mut cbw_data = vec![0u8; 31];
+        cbw_data[0..4].copy_from_slice(&0x43425355u32.to_le_bytes()); // "USBC"
+        cbw_data[4..8].copy_from_slice(&1u32.to_le_bytes()); // CBWタグ
+        cbw_data[8..12].copy_from_slice(&36u32.to_le_bytes()); // データ転送長（36バイト）
+        cbw_data[12] = 0x80; // bmCBWFlags (Data-In)
+        cbw_data[13] = 0; // bCBWLUN
+        cbw_data[14] = 6; // bCBWCBLength (INQUIRYコマンド長)
+
+        // SCSI INQUIRYコマンド
+        cbw_data[15] = 0x12; // INQUIRY オペレーションコード
+        cbw_data[16] = 0x00; // EVPD=0
+        cbw_data[17] = 0x00; // Page Code
+        cbw_data[18] = 0x00; // Reserved
+        cbw_data[19] = 36; // Allocation Length
+        cbw_data[20] = 0x00; // Control
+
+        let mut cbw_data = Box::into_pin(cbw_data.into_boxed_slice());
+
+        // CBW送信
+        let trb_ptr = bulk_out_ring.push(NormalTrb::new_out(cbw_data.as_mut()).into())?;
+        xhc.notify_ep(slot, bulk_out_dci)?;
+        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+        info!("xHCI: INQUIRY CBW sent successfully");
+
+        // データ受信（36バイト）
+        let read_data = vec![0u8; 36];
+        let mut read_data = Box::into_pin(read_data.into_boxed_slice());
+
+        let trb_ptr = bulk_in_ring.push(NormalTrb::new_in(read_data.as_mut()).into())?;
+        xhc.notify_ep(slot, bulk_in_dci)?;
+        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+
+        // CSW受信
+        let csw = vec![0u8; 13];
+        let mut csw = Box::into_pin(csw.into_boxed_slice());
+
+        let trb_ptr = bulk_in_ring.push(NormalTrb::new_in(csw.as_mut()).into())?;
+        xhc.notify_ep(slot, bulk_in_dci)?;
+        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+
+        info!("xHCI: INQUIRY data: {:02x?}", &read_data[..]);
+        Ok(read_data.to_vec())
     }
 
     // SCSI READ(10) コマンドの追加
@@ -370,11 +497,6 @@ impl PciXhciDriver {
         lba: u32,
         transfer_length: u16,
     ) -> Result<Vec<u8>> {
-        info!(
-            "xHCI: Starting SCSI READ(10) command - LBA: {}, Length: {}",
-            lba, transfer_length
-        );
-
         // CBW作成 (31バイト) - READ(10)用
         let mut cbw_data = vec![0u8; 31];
         cbw_data[0..4].copy_from_slice(&0x43425355u32.to_le_bytes()); // "USBC"
@@ -392,43 +514,102 @@ impl PciXhciDriver {
         cbw_data[22..24].copy_from_slice(&transfer_length.to_be_bytes()); // TransferLength (ビッグエンディアン)
         cbw_data[24] = 0x00; // Control
 
-        let cbw_data = Box::into_pin(cbw_data.into_boxed_slice());
+        let mut cbw_data = Box::into_pin(cbw_data.into_boxed_slice());
+        // CBW送信
+        let cbw_trb = NormalTrb::new_out(cbw_data.as_mut());
+        let cbw_trb_ptr = bulk_out_ring.push(cbw_trb.into())?;
+        info!("CBW TRB pushed at address: {:#x}", cbw_trb_ptr);
 
-        // 1. CBWをBulk OUT転送で送信
-        let trb_ptr = bulk_out_ring.push(NormalTrb::new_out_generic(cbw_data.as_ref()).into())?;
         xhc.notify_ep(slot, bulk_out_dci)?;
-        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+        let usbsts = xhc.regs.op_regs.as_ref().usbsts();
+        info!(
+            "After Doorbell: USBSTS={:#x} => HCHalted={}, HostErr={}, EventInt={}, PortChg={}, HostCtrEvt={}",
+            usbsts,
+            (usbsts & 0x1) != 0,
+            (usbsts & 0x2) != 0,
+            (usbsts & 0x4) != 0,
+            (usbsts & 0x8) != 0,
+            (usbsts & 0x10) != 0,
+        );
+        info!("Waiting for CBW transfer event at {:#x}", cbw_trb_ptr);
+
+        EventFuture::new_for_trb(&xhc.primary_event_ring, cbw_trb_ptr)
             .await?
             .transfer_result_ok()?;
+        info!("xHCI: READ(10) CBW sent successfully");
 
-        // 2. データをBulk IN転送で受信
+        // データ受信
         let data_size = (transfer_length as usize) * 512;
         let read_data = vec![0u8; data_size];
         let mut read_data = Box::into_pin(read_data.into_boxed_slice());
 
-        info!("xHCI: Receiving {} bytes via Bulk IN", data_size);
-        let trb_ptr = bulk_in_ring.push(NormalTrb::new_in(read_data.as_mut()).into())?;
+        let data_trb_ptr = bulk_in_ring.push(NormalTrb::new_in(read_data.as_mut()).into())?;
+        info!("Data TRB pushed at address: {:#x}", data_trb_ptr);
+
         xhc.notify_ep(slot, bulk_in_dci)?;
-        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+        let usbsts = xhc.regs.op_regs.as_ref().usbsts();
+        info!(
+            "After Doorbell: USBSTS={:#x} => HCHalted={}, HostErr={}, EventInt={}, PortChg={}, HostCtrEvt={}",
+            usbsts,
+            (usbsts & 0x1) != 0,
+            (usbsts & 0x2) != 0,
+            (usbsts & 0x4) != 0,
+            (usbsts & 0x8) != 0,
+            (usbsts & 0x10) != 0,
+        );
+        info!("Waiting for data transfer event at {:#x}", data_trb_ptr);
+
+        EventFuture::new_for_trb(&xhc.primary_event_ring, data_trb_ptr)
             .await?
             .transfer_result_ok()?;
+        info!("xHCI: Data received successfully");
 
-        // 3. CSW受信
+        // CSW受信
         let csw = vec![0u8; 13];
         let mut csw = Box::into_pin(csw.into_boxed_slice());
 
-        let trb_ptr = bulk_in_ring.push(NormalTrb::new_in(csw.as_mut()).into())?;
+        let csw_trb_ptr = bulk_in_ring.push(NormalTrb::new_in(csw.as_mut()).into())?;
+        info!("CSW TRB pushed at address: {:#x}", csw_trb_ptr);
+
         xhc.notify_ep(slot, bulk_in_dci)?;
-        EventFuture::new_for_trb(&xhc.primary_event_ring, trb_ptr)
+        let usbsts = xhc.regs.op_regs.as_ref().usbsts();
+        info!(
+            "After Doorbell: USBSTS={:#x} => HCHalted={}, HostErr={}, EventInt={}, PortChg={}, HostCtrEvt={}",
+            usbsts,
+            (usbsts & 0x1) != 0,
+            (usbsts & 0x2) != 0,
+            (usbsts & 0x4) != 0,
+            (usbsts & 0x8) != 0,
+            (usbsts & 0x10) != 0,
+        );
+        info!("Waiting for CSW transfer event at {:#x}", csw_trb_ptr);
+
+        EventFuture::new_for_trb(&xhc.primary_event_ring, csw_trb_ptr)
             .await?
             .transfer_result_ok()?;
+        info!("xHCI: CSW received successfully");
 
-        // データの最初の部分をログ出力
+        // CSWの検証
+        let csw_signature = u32::from_le_bytes([csw[0], csw[1], csw[2], csw[3]]);
+        let csw_tag = u32::from_le_bytes([csw[4], csw[5], csw[6], csw[7]]);
+        let csw_status = csw[12];
+
         info!(
-            "xHCI: Read data (first 64 bytes): {:02x?}",
-            &read_data[..64.min(data_size)]
+            "CSW: signature={:#x}, tag={}, status={}",
+            csw_signature, csw_tag, csw_status
         );
 
+        if csw_signature != 0x53425355 {
+            // "USBS"
+            return Err("Invalid CSW signature");
+        }
+
+        if csw_status != 0 {
+            return Err("SCSI command failed");
+        }
+
+        // データの最初の部分をログ出力
+        Self::analyze_sector_zero(&read_data);
         Ok(read_data.to_vec())
     }
 
@@ -439,6 +620,8 @@ impl PciXhciDriver {
         ep_desc: &EndpointDescriptor,
         dci: usize,
     ) -> Result<CommandRing> {
+        let ep_ring = CommandRing::default();
+
         let mut input_ctrl_ctx = InputControlContext::default();
         input_ctrl_ctx.add_context(0)?; // Slot context
         input_ctrl_ctx.add_context(dci)?; // Endpoint context
@@ -446,15 +629,11 @@ impl PciXhciDriver {
         let mut input_context = Box::pin(InputContext::default());
         input_context.as_mut().set_input_ctrl_ctx(input_ctrl_ctx)?;
 
-        let ep_ring = CommandRing::default();
         let ep_type = if ep_desc.endpoint_address & 0x80 != 0 {
             EndpointType::BulkIn
         } else {
             EndpointType::BulkOut
         };
-
-        // エンドポイント設定前にデバイスの状態を確認
-        info!("Configuring endpoint DCI {} for slot {}", dci, slot);
 
         let ep_ctx = EndpointContext::new_bulk_endpoint(
             ep_desc.max_packet_size,
@@ -463,23 +642,23 @@ impl PciXhciDriver {
         )?;
 
         input_context.as_mut().set_ep_ctx(dci, ep_ctx)?;
-
-        // 最大DCIを更新
-        input_context.as_mut().set_last_valid_dci(dci)?;
+        let current_max_dci = if dci > 1 { dci } else { 1 };
+        input_context
+            .as_mut()
+            .set_last_valid_dci(dci.max(current_max_dci))?; // 最大DCIを更新
 
         let cmd = GenericTrbEntry::cmd_configure_endpoint(input_context.as_ref(), slot);
+
         let result = xhc.send_command(cmd).await;
 
         match &result {
             Ok(_) => info!("Configure Endpoint command succeeded"),
             Err(e) => info!("Configure Endpoint command failed: {:?}", e),
         }
-
         result?.cmd_result_ok()?;
 
         Ok(ep_ring)
     }
-    /// SCSI INQUIRYコマンド
 
     // READ CAPACITY応答の解析
     fn parse_read_capacity_response(data: &[u8]) -> Result<(u32, u32)> {
@@ -505,7 +684,6 @@ impl PciXhciDriver {
 
         Ok((last_lba, block_size))
     }
-
     async fn init_port(xhc: &Rc<Controller>, port: usize) -> Result<u8> {
         let portsc = xhc.regs.portsc.get(port).ok_or("Port not found")?;
         //info!("xHCI: resetting port {port}");
@@ -632,6 +810,124 @@ impl PciXhciDriver {
         let iter = DescriptorIterator::new(&buf);
         let descriptors: Vec<UsbDescriptor> = iter.collect();
         Ok(descriptors)
+    }
+    // 新しい関数：セクタ0（MBR）の解析
+    fn analyze_sector_zero(data: &[u8]) {
+        info!("=== Master Boot Record (MBR) Analysis ===");
+
+        // MBRの構造を解析
+        if data.len() >= 512 {
+            // ブートシグネチャをチェック（オフセット510-511に0x55AAがあるはず）
+            let boot_signature = u16::from_le_bytes([data[510], data[511]]);
+            info!(
+                "Boot Signature: {:#x} {}",
+                boot_signature,
+                if boot_signature == 0xAA55 {
+                    "(Valid MBR)"
+                } else {
+                    "(Invalid MBR)"
+                }
+            );
+
+            // パーティションテーブル（オフセット446-509）の解析
+            info!("=== Partition Table ===");
+            for i in 0..4 {
+                let offset = 446 + i * 16;
+                if offset + 16 <= data.len() {
+                    let partition = &data[offset..offset + 16];
+                    Self::analyze_partition_entry(i + 1, partition);
+                }
+            }
+            // ASCII文字列を探す
+            Self::find_ascii_strings(data);
+        }
+    }
+
+    // パーティションエントリの解析
+    fn analyze_partition_entry(partition_num: usize, entry: &[u8]) {
+        if entry.len() >= 16 {
+            let boot_flag = entry[0];
+            let start_head = entry[1];
+            let start_sector = entry[2] & 0x3F;
+            let start_cylinder = ((entry[2] & 0xC0) << 2) | entry[3];
+            let partition_type = entry[4];
+            let end_head = entry[5];
+            let end_sector = entry[6] & 0x3F;
+            let end_cylinder = ((entry[6] & 0xC0) << 2) | entry[7];
+            let lba_start = u32::from_le_bytes([entry[8], entry[9], entry[10], entry[11]]);
+            let sector_count = u32::from_le_bytes([entry[12], entry[13], entry[14], entry[15]]);
+
+            info!(
+                "Partition {}: Boot={:#x}, Type={:#x} ({}), LBA={}, Sectors={}",
+                partition_num,
+                boot_flag,
+                partition_type,
+                Self::partition_type_name(partition_type),
+                lba_start,
+                sector_count
+            );
+
+            if sector_count > 0 {
+                let size_mb = (sector_count as u64 * 512) / (1024 * 1024);
+                info!(
+                    "  Size: {} MB, CHS Start: {}/{}/{}, CHS End: {}/{}/{}",
+                    size_mb,
+                    start_cylinder,
+                    start_head,
+                    start_sector,
+                    end_cylinder,
+                    end_head,
+                    end_sector
+                );
+            }
+        }
+    }
+
+    // パーティションタイプ名の取得
+    fn partition_type_name(partition_type: u8) -> &'static str {
+        match partition_type {
+            0x00 => "Empty",
+            0x01 => "FAT12",
+            0x04 => "FAT16 <32MB",
+            0x05 => "Extended",
+            0x06 => "FAT16",
+            0x07 => "NTFS/HPFS/exFAT",
+            0x0B => "FAT32",
+            0x0C => "FAT32 LBA",
+            0x0E => "FAT16 LBA",
+            0x0F => "Extended LBA",
+            0x82 => "Linux Swap",
+            0x83 => "Linux",
+            0xEE => "GPT Protective",
+            _ => "Unknown",
+        }
+    }
+
+    // ASCII文字列を探す
+    fn find_ascii_strings(data: &[u8]) {
+        info!("=== ASCII Strings Found ===");
+        let mut current_string = String::new();
+        let mut start_offset = 0;
+
+        for (i, &byte) in data.iter().enumerate() {
+            if byte.is_ascii_graphic() || byte == b' ' {
+                if current_string.is_empty() {
+                    start_offset = i;
+                }
+                current_string.push(byte as char);
+            } else {
+                if current_string.len() >= 4 {
+                    // 4文字以上の文字列のみ表示
+                    info!("  Offset {:#x}: \"{}\"", start_offset, current_string);
+                }
+                current_string.clear();
+            }
+        }
+
+        // 最後の文字列をチェック
+        if current_string.len() >= 4 {
+            info!("  Offset {:#x}: \"{}\"", start_offset, current_string);
+        }
     }
 }
 
@@ -768,15 +1064,19 @@ struct RuntimeRegisters {
 }
 const _: () = assert!(size_of::<RuntimeRegisters>() == 0x8020);
 impl RuntimeRegisters {
-    pub fn mfindex(&self) -> u32 {
-        self.mfindex.read()
-    }
     fn init_irs(&mut self, index: usize, ring: &mut EventRing) -> Result<()> {
         let irs = self.irs.get_mut(index).ok_or("Index out of range")?;
+        // セグメント数
         irs.erst_size = 1;
-        irs.erdp = ring.ring_phys_addr();
+        // ERST ベースアドレス
         irs.erst_base = ring.erst_phys_addr();
-        irs.management = 0;
+        // ERDP 初期値（リング先頭）
+        irs.erdp = ring.ring_phys_addr();
+        // Interrupt-Moderation = 0 → 即時に ERDP を更新
+        irs.moderation = 0;
+        // Interrupt Enable を立てる（Bit0=IE）
+        irs.management = 1;
+        // ソフトウェア側にも ERDP ポインタを教えておく
         ring.set_erdp(&mut irs.erdp as *mut u64);
         Ok(())
     }
@@ -852,8 +1152,26 @@ impl EndpointContext {
         ep.set_error_count(3)?;
         ep.set_max_packet_size(max_packet_size);
         ep.set_ring_deque_pointer(tr_deque_ptr)?;
+
+        // Bulk転送用の設定を追加
         ep.average_trb_length = max_packet_size;
+
+        // 実機対応: Max Burst Sizeの設定
+        ep.set_max_burst_size(0)?; // Bulk転送では通常0
+
+        ep.data[0] &= !(0x3 << 0);
+        ep.data[0] |= 0 << 0; // Mult = 0
+
         Ok(ep)
+    }
+    fn set_max_burst_size(&mut self, burst_size: u8) -> Result<()> {
+        if burst_size <= 15 {
+            self.data[1] &= !(0xF << 8);
+            self.data[1] |= (burst_size as u32) << 8;
+            Ok(())
+        } else {
+            Err("Invalid max burst size")
+        }
     }
     fn set_ring_deque_pointer(&mut self, tr_deque_ptr: u64) -> Result<()> {
         self.tr_deque_ptr.write_bits(4, 60, tr_deque_ptr >> 4)
@@ -973,6 +1291,8 @@ struct Controller {
     command_ring: Mutex<CommandRing>,
 }
 impl Controller {
+    const FEATURE_ENDPOINT_HALT: u16 = 0;
+
     pub fn new(mut regs: XhcRegisters) -> Result<Self> {
         unsafe {
             regs.op_regs.get_unchecked_mut().reset_xhc();
@@ -1013,8 +1333,9 @@ impl Controller {
     }
     async fn send_command(&self, cmd: GenericTrbEntry) -> Result<GenericTrbEntry> {
         let cmd_ptr = self.command_ring.lock().push(cmd)?;
+        fence(Ordering::SeqCst);
         self.notify_xhc();
-        EventFuture::new_for_trb(&self.primary_event_ring, cmd_ptr).await
+        EventFuture::new_for_command(&self.primary_event_ring, cmd_ptr).await
     }
     fn notify_xhc(&self) {
         self.regs.doorbell_regs[0].notify(0, 0)
@@ -1027,6 +1348,16 @@ impl Controller {
             .ok_or("Invalid slot")?;
         let dci = u8::try_from(dci).or(Err("dci out of range"))?;
         db.notify(dci, 0);
+        // UnsafeCell を使った内部可変性経由で &mut OperationalRegisters を取得
+        let op = unsafe { self.regs.op_regs.as_ref() };
+        let sts = op.usbsts.read();
+        // xHCI spec: 書き込み “1” でクリアするビットを OR した値を上書き
+        const TO_CLEAR: u32 = (1 << 2) // Event Interrupt
+                            | (1 << 3) // Port Change Detect
+                            | (1 << 4); // Host Controller Event
+        op.usbsts.write(sts & !TO_CLEAR); // 念のため残りのフラグは保持したい場合
+                                          // または op.usbsts.write(TO_CLEAR); としてビット単体でクリア
+
         Ok(())
     }
     fn set_output_context_for_slot(&self, slot: u8, output_context: Pin<Box<OutputContext>>) {
@@ -1060,7 +1391,6 @@ impl Controller {
             .transfer_result_ok()?;
         Ok(())
     }
-
     async fn request_descriptor<T: Sized>(
         &self,
         slot: u8,
@@ -1087,8 +1417,39 @@ impl Controller {
             .await?
             .transfer_result_ok()
     }
-}
+    /// Clear Feature (ENDPOINT_HALT) リクエストの実装
+    pub async fn clear_endpoint_halt(
+        &self,
+        slot: u8,
+        ctrl_ep_ring: &mut CommandRing,
+        endpoint_address: u8,
+    ) -> Result<()> {
+        // Setup Stage: Clear Feature リクエスト
+        ctrl_ep_ring.push(
+            SetupStageTrb::new(
+                SetupStageTrb::REQ_TYPE_DIR_HOST_TO_DEVICE  // bmRequestType: 0x02
+                    | SetupStageTrb::REQ_TYPE_TO_ENDPOINT, // Recipient: Endpoint
+                SetupStageTrb::REQ_CLEAR_FEATURE, // bRequest: CLEAR_FEATURE (1)
+                Self::FEATURE_ENDPOINT_HALT,      // wValue: ENDPOINT_HALT (0)
+                endpoint_address as u16,          // wIndex: Endpoint Address
+                0,                                // wLength: 0 (no data stage)
+            )
+            .into(),
+        )?;
 
+        // Status Stage (IN direction for no-data control transfer)
+        let trb_ptr = ctrl_ep_ring.push(StatusStageTrb::new_in().into())?;
+
+        fence(Ordering::SeqCst);
+        // Doorbell通知とイベント待機
+        self.notify_ep(slot, 1)?; // Control endpoint DCI = 1
+        EventFuture::new_for_trb(&self.primary_event_ring, trb_ptr)
+            .await?
+            .transfer_result_ok()?;
+
+        Ok(())
+    }
+}
 struct EventRing {
     ring: IoBox<TrbRing>,
     erst: IoBox<EventRingSegmentTableEntry>,
@@ -1098,7 +1459,13 @@ struct EventRing {
 }
 impl EventRing {
     fn new() -> Result<Self> {
-        let ring = TrbRing::new();
+        let mut ring = TrbRing::new();
+        // セグメント末尾に Link TRB を置いて、リング構造を完成させる
+        {
+            let link = GenericTrbEntry::trb_link(ring.as_ref());
+            let ring_mut = unsafe { ring.get_unchecked_mut() };
+            ring_mut.write(TrbRing::NUM_TRB - 1, link)?;
+        }
         let erst = EventRingSegmentTableEntry::new(&ring)?;
         Ok(Self {
             ring,
@@ -1118,6 +1485,7 @@ impl EventRing {
         self.erst.as_ref() as *const EventRingSegmentTableEntry as u64
     }
     fn pop(&mut self) -> Result<Option<GenericTrbEntry>> {
+        fence(Ordering::Acquire);
         if !self.has_next_event() {
             return Ok(None);
         }
@@ -1127,6 +1495,7 @@ impl EventRing {
         unsafe {
             let erdp = self.erdp.expect("EventRing erdp is not set");
             write_volatile(erdp, eptr | (*erdp & 0b1111));
+            fence(Ordering::Release);
         }
         if self.ring.as_ref().current_index() == 0 {
             self.cycle_state_ours = !self.cycle_state_ours;
@@ -1136,18 +1505,25 @@ impl EventRing {
     async fn poll(&mut self) -> Result<()> {
         if let Some(e) = self.pop()? {
             let mut consumed = false;
-            for w in &self.wait_list {
+            for (idx, w) in self.wait_list.iter().enumerate() {
                 if let Some(w) = w.upgrade() {
                     let w: &EventWaitInfo = w.as_ref();
                     if w.matches(&e) {
                         w.resolve(&e)?;
                         consumed = true;
+                        break; // 最初にマッチしたwaiterのみで停止
                     }
                 }
             }
+            /*
             if !consumed {
-                info!("unhandled event: {e:?}")
-            }
+                info!(
+                    "Unhandled event: type={}, data={:#x}",
+                    e.trb_type(),
+                    e.data()
+                );
+            }*/
+
             let stale_waiter_indices = self
                 .wait_list
                 .iter()
@@ -1168,6 +1544,7 @@ impl EventRing {
         Ok(())
     }
     fn has_next_event(&self) -> bool {
+        fence(Ordering::Acquire);
         self.ring.as_ref().current().cycle_state() == self.cycle_state_ours
     }
     pub fn register_waiter(&mut self, waiter: &Rc<EventWaitInfo>) {
@@ -1295,6 +1672,8 @@ impl GenericTrbEntry {
     const CTRL_BIT_INTERRUPT_ON_SHORT_PACKET: u32 = 1 << 2;
     const CTRL_BIT_INTERRUPT_ON_COMPLETION: u32 = 1 << 5;
     const CTRL_BIT_IMMEDIATE_DATA: u32 = 1 << 6;
+
+    const CTRL_BIT_DATA_DIR_OUT: u32 = 0 << 16;
     const CTRL_BIT_DATA_DIR_IN: u32 = 1 << 16;
     fn trb_link(ring: &TrbRing) -> Self {
         let mut trb = GenericTrbEntry::default();
@@ -1303,7 +1682,6 @@ impl GenericTrbEntry {
         trb.set_toggle_cycle(true);
         trb
     }
-
     fn set_trb_type(&mut self, trb_type: TrbType) {
         self.control.write_bits(10, 6, trb_type as u32).unwrap();
     }
@@ -1382,7 +1760,6 @@ impl From<SetupStageTrb> for GenericTrbEntry {
         unsafe { transmute(trb) }
     }
 }
-
 impl From<DataStageTrb> for GenericTrbEntry {
     fn from(trb: DataStageTrb) -> GenericTrbEntry {
         unsafe { transmute(trb) }
@@ -1393,12 +1770,16 @@ impl From<StatusStageTrb> for GenericTrbEntry {
         unsafe { transmute(trb) }
     }
 }
+impl From<NormalTrb> for GenericTrbEntry {
+    fn from(trb: NormalTrb) -> GenericTrbEntry {
+        unsafe { transmute(trb) }
+    }
+}
 
 struct CommandRing {
     ring: IoBox<TrbRing>,
     cycle_state_ours: bool,
 }
-
 impl CommandRing {
     fn ring_phys_addr(&self) -> u64 {
         self.ring.as_ref() as *const TrbRing as u64
@@ -1408,15 +1789,32 @@ impl CommandRing {
         if ring.current().cycle_state() != self.cycle_state_ours {
             return Err("Command Ring is Full");
         }
-        src.set_cycle_state(self.cycle_state_ours);
+
         let dst_ptr = ring.current_ptr();
+        // 正しい物理アドレス計算
+        let ring_base_phys = ring.phys_addr();
+        let ring_base_virt = ring as *const TrbRing as u64;
+        let dst_phys_addr = ring_base_phys + (dst_ptr as u64 - ring_base_virt);
+
+        unsafe {
+            // 実機対応: TRBエリアを完全にクリア
+            core::ptr::write_bytes(dst_ptr as *mut u8, 0, 16);
+            fence(Ordering::SeqCst);
+        }
+
+        src.set_cycle_state(self.cycle_state_ours);
         ring.write_current(src);
+
+        // 実機対応: 書き込み後に強制同期
+        fence(Ordering::SeqCst);
+
         ring.advance_index(!self.cycle_state_ours)?;
         if ring.current().trb_type() == TrbType::Link as u32 {
             ring.advance_index(!self.cycle_state_ours)?;
             self.cycle_state_ours = !self.cycle_state_ours;
         }
-        Ok(dst_ptr as u64)
+
+        Ok(dst_phys_addr) // 物理アドレスを返す
     }
 }
 impl Default for CommandRing {
@@ -1446,18 +1844,30 @@ struct EventWaitInfo {
 }
 impl EventWaitInfo {
     fn matches(&self, trb: &GenericTrbEntry) -> bool {
+        // デバッグログを追加
+        if let Some(trb_addr) = self.cond.trb_addr {
+            if trb.data() != trb_addr {
+                info!(
+                    "TRB address mismatch: expected {:#x}, got {:#x}",
+                    trb_addr,
+                    trb.data()
+                );
+                return false;
+            }
+        }
         if let Some(trb_type) = self.cond.trb_type {
             if trb.trb_type() != trb_type as u32 {
+                info!(
+                    "TRB type mismatch: expected {:?}, got {}",
+                    trb_type,
+                    trb.trb_type()
+                );
                 return false;
             }
         }
         if let Some(slot) = self.cond.slot {
             if trb.slot_id() != slot {
-                return false;
-            }
-        }
-        if let Some(trb_addr) = self.cond.trb_addr {
-            if trb.data() != trb_addr {
+                info!("Slot ID mismatch: expected {}, got {}", slot, trb.slot_id());
                 return false;
             }
         }
@@ -1607,8 +2017,20 @@ impl EventFuture {
         Self::new(
             event_ring,
             EventWaitCond {
+                trb_type: Some(TrbType::TransferEvent),
                 trb_addr,
                 ..Default::default()
+            },
+        )
+    }
+    // Command用の新しい関数を追加
+    fn new_for_command(event_ring: &Mutex<EventRing>, trb_addr: u64) -> Self {
+        Self::new(
+            event_ring,
+            EventWaitCond {
+                trb_type: Some(TrbType::CommandCompletionEvent), // Command Completion Eventを指定
+                trb_addr: Some(trb_addr),
+                slot: None,
             },
         )
     }
@@ -1782,8 +2204,11 @@ impl SetupStageTrb {
 
     pub const REQ_TYPE_TO_DEVICE: u8 = 0;
     pub const REQ_TYPE_TO_INTERFACE: u8 = 1;
+    pub const REQ_TYPE_TO_ENDPOINT: u8 = 2;
 
     pub const REQ_GET_REPORT: u8 = 1;
+    pub const REQ_CLEAR_FEATURE: u8 = 1;
+    pub const REQ_SET_FEATURE: u8 = 3;
     pub const REQ_GET_DESCRIPTOR: u8 = 6;
     pub const REQ_SET_CONFIGURATION: u8 = 9;
     pub const REQ_SET_INTERFACE: u8 = 11;
@@ -1834,13 +2259,14 @@ impl DataStageTrb {
                 | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET,
         }
     }
-    pub fn new_out<T: Sized>(buf: Pin<&[T]>) -> Self {
+    pub fn new_out<T: Sized>(buf: Pin<&mut [T]>) -> Self {
         Self {
             buf: buf.as_ptr() as u64,
             option: (buf.len() * size_of::<T>()) as u32,
             control: (TrbType::DataStage as u32) << 10
-                // DATA_DIR_INビットなし = OUT方向
-                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION,
+                | GenericTrbEntry::CTRL_BIT_DATA_DIR_OUT
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET,
         }
     }
 }
@@ -1869,6 +2295,37 @@ impl StatusStageTrb {
                 | GenericTrbEntry::CTRL_BIT_DATA_DIR_IN
                 | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION
                 | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+#[repr(C, align(16))]
+pub struct NormalTrb {
+    buf: u64,
+    option: u32,
+    control: u32,
+}
+
+impl NormalTrb {
+    pub fn new_in<T: Sized>(buf: Pin<&mut [T]>) -> Self {
+        Self {
+            buf: buf.as_ptr() as u64,
+            option: (buf.len() * size_of::<T>()) as u32,
+            control: (TrbType::Normal as u32) << 10
+                | GenericTrbEntry::CTRL_BIT_DATA_DIR_IN
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET,
+        }
+    }
+    pub fn new_out<T: Sized>(buf: Pin<&mut [T]>) -> Self {
+        Self {
+            buf: buf.as_ptr() as u64,
+            option: (buf.len() * size_of::<T>()) as u32,
+            control: (TrbType::Normal as u32) << 10
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET
+                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION
+                | GenericTrbEntry::CTRL_BIT_DATA_DIR_OUT,
         }
     }
 }
@@ -1976,48 +2433,5 @@ impl<'a> Iterator for DescriptorIterator<'a> {
             self.index += desc_len as usize;
             Some(desc)
         }
-    }
-}
-
-#[derive(Copy, Clone)]
-#[repr(C, align(16))]
-pub struct NormalTrb {
-    buf: u64,
-    option: u32,
-    control: u32,
-}
-
-impl NormalTrb {
-    pub fn new_in<T: Sized>(buf: Pin<&mut [T]>) -> Self {
-        Self {
-            buf: buf.as_ptr() as u64,
-            option: (buf.len() * size_of::<T>()) as u32,
-            control: (TrbType::Normal as u32) << 10
-                | GenericTrbEntry::CTRL_BIT_DATA_DIR_IN
-                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION
-                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_SHORT_PACKET,
-        }
-    }
-    pub fn new_out(buf: Pin<Box<CommandBlockWrapper>>) -> Self {
-        Self {
-            buf: buf.as_ref().get_ref() as *const CommandBlockWrapper as u64, // CBW全体のアドレス
-            option: size_of::<CommandBlockWrapper>() as u32,                  // 配列の長さを使用
-            control: (TrbType::Normal as u32) << 10
-                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION,
-        }
-    }
-    pub fn new_out_generic<T: Sized>(buf: Pin<&[T]>) -> Self {
-        Self {
-            buf: buf.as_ptr() as u64,
-            option: (buf.len() * size_of::<T>()) as u32,
-            control: (TrbType::Normal as u32) << 10
-                | GenericTrbEntry::CTRL_BIT_INTERRUPT_ON_COMPLETION,
-        }
-    }
-}
-
-impl From<NormalTrb> for GenericTrbEntry {
-    fn from(trb: NormalTrb) -> GenericTrbEntry {
-        unsafe { transmute(trb) }
     }
 }
